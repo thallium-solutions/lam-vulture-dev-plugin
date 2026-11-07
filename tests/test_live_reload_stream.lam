@@ -1,0 +1,109 @@
+# Test: the live reload event stream over a real listener. The stream
+# announces the server's boot id, swaps stylesheets on .css changes,
+# reloads on other asset changes (after the files settle), ignores
+# unchanged files, and ends promptly on a graceful shutdown.
+#
+# expect: boot matches tag: true
+# expect: styles event: styles app.css
+# expect: reload event: reload 1
+# expect: mixed change: reload 2
+# expect: quiet without changes: true
+# expect: shutdown prompt: true
+# expect: ok
+
+from @lam/vulture import Server
+from @lam/vulture/dev-plugin import LiveReload
+from lamos import Os
+from lamtime import Time
+
+go! {
+    import (
+        "bufio"
+        "net/http"
+        "strings"
+        "time"
+    )
+
+    var liveEvents = make(chan string, 32)
+
+    // Read named events from the stream in the background and publish
+    // them as "<event> <data>".
+    func liveListen(url string) {
+        go func() {
+            client := &http.Client{Timeout: 60 * time.Second}
+            resp, err := client.Get(url)
+            if err != nil {
+                liveEvents <- "error " + err.Error()
+                return
+            }
+            defer resp.Body.Close()
+            name := ""
+            scanner := bufio.NewScanner(resp.Body)
+            for scanner.Scan() {
+                line := scanner.Text()
+                switch {
+                case strings.HasPrefix(line, "event: "):
+                    name = strings.TrimPrefix(line, "event: ")
+                case strings.HasPrefix(line, "data: "):
+                    liveEvents <- name + " " + strings.TrimPrefix(line, "data: ")
+                    name = ""
+                }
+            }
+            liveEvents <- "closed"
+        }()
+    }
+
+    func liveNext(timeoutMs int) string {
+        select {
+        case event := <-liveEvents:
+            return event
+        case <-time.After(time.Duration(timeoutMs) * time.Millisecond):
+            return "timeout"
+        }
+    }
+}
+
+func nextEvent(timeoutMs: int) -> str {
+    event: str = ""
+    go! {
+        event = liveNext(timeoutMs)
+    }
+    return event
+}
+
+func main() {
+    root: str = Os.tempDir() + "/lam-live-reload-" + str(Time.nowUnixNano())
+    _ = Os.mkdir(root + "/build")
+    _ = Os.writeFile(root + "/build/app.css", "body{}")
+    _ = Os.writeFile(root + "/app.js", "1")
+
+    live: LiveReload = LiveReload([root], "/__lam/live-reload", 50)
+    srv: Server = Server()
+    live.register(srv)
+    _ = srv.listenBackground(18791).unwrap()
+    go! {
+        liveListen("http://127.0.0.1:18791/__lam/live-reload")
+    }
+
+    boot: str = nextEvent(3000)
+    print(f"boot matches tag: {boot == 'boot ' + live.boot and live.boot in live.tag()}")
+
+    _ = Os.writeFile(root + "/build/app.css", "body{color:red}")
+    print(f"styles event: {nextEvent(3000)}")
+
+    _ = Os.writeFile(root + "/app.js", "2")
+    print(f"reload event: {nextEvent(3000)}")
+
+    _ = Os.writeFile(root + "/app.js", "3")
+    _ = Os.writeFile(root + "/build/app.css", "body{color:blue}")
+    print(f"mixed change: {nextEvent(3000)}")
+
+    print(f"quiet without changes: {nextEvent(400) == 'timeout'}")
+
+    begun: int = Time.nowUnixMilli()
+    srv.shutdown(5000)
+    took: int = Time.nowUnixMilli() - begun
+    print(f"shutdown prompt: {took < 2000 and nextEvent(3000) == 'closed'}")
+    _ = Os.removeAll(root)
+    print("ok")
+}

@@ -1,0 +1,189 @@
+# @lam/vulture/dev-plugin: development helpers for @lam/vulture servers.
+#
+# Browser live reload for `lamc dev`: when lamc rebuilds and restarts the
+# server, open pages reload; when a watched stylesheet changes, pages swap
+# it in place. The plugin is inert unless the process runs under `lamc dev`
+# (`LAMC_DEV=1`) or it is forced, so production servers can register it
+# unconditionally.
+
+from @lam/vulture import Server, Request, Response, SseEmitter
+from lamenv import Env
+from lamhash import Hash
+from lamos import Os
+from lampath import Path
+from lamtime import Time
+
+const LiveReloadPath: str = "/__lam/live-reload"
+const HeartbeatMs: int = 15000
+
+const LiveReloadScript: str = """(() => {
+  const script = document.currentScript;
+  const endpoint = script.dataset.endpoint;
+  const boot = script.dataset.boot;
+  const key = "lam-live-reload:" + location.pathname + location.search;
+  const saved = sessionStorage.getItem(key);
+  if (saved !== null) {
+    sessionStorage.removeItem(key);
+    const restore = () => window.scrollTo(0, Number(saved));
+    if (document.readyState === "complete") restore();
+    else window.addEventListener("load", restore, { once: true });
+  }
+  let reloading = false;
+  const reload = (reason) => {
+    if (reloading) return;
+    const event = new CustomEvent("lam:live-reload", { cancelable: true, detail: { reason } });
+    if (!window.dispatchEvent(event)) return;
+    reloading = true;
+    sessionStorage.setItem(key, String(window.scrollY));
+    location.reload();
+  };
+  const swapStyles = (names) => {
+    const wanted = names.split(",").filter(Boolean);
+    const links = [...document.querySelectorAll('link[rel="stylesheet"]')].filter((link) => {
+      const path = new URL(link.href, location.href).pathname;
+      return wanted.some((name) => path === name || path.endsWith("/" + name));
+    });
+    if (links.length === 0) return reload("styles");
+    const stamp = Date.now().toString(36);
+    for (const link of links) {
+      const next = link.cloneNode();
+      const url = new URL(link.href, location.href);
+      url.searchParams.set("lam-live-reload", stamp);
+      next.href = url.toString();
+      next.addEventListener("load", () => link.remove(), { once: true });
+      next.addEventListener("error", () => next.remove(), { once: true });
+      link.after(next);
+    }
+    window.dispatchEvent(new CustomEvent("lam:live-styles", { detail: { names: wanted } }));
+  };
+  const connect = () => {
+    const source = new EventSource(endpoint);
+    source.addEventListener("boot", (event) => { if (event.data !== boot) reload("server"); });
+    source.addEventListener("reload", () => reload("assets"));
+    source.addEventListener("styles", (event) => swapStyles(event.data));
+    source.onerror = () => { source.close(); setTimeout(connect, 300); };
+  };
+  connect();
+})();
+"""
+
+class LiveReload {
+    #- Browser live reload for development servers. ``register`` adds the
+    event stream (``path``), its script (``path + ".js"``) and an ``onSend``
+    hook placing the script tag before ``</body>`` of every HTML document
+    (fragments without ``</body>``, such as htmx partials, are untouched).
+
+    A page reloads when the server it was rendered by has been replaced
+    (``lamc dev`` restarted it) or when a watched asset changes; a changed
+    stylesheet (``.css``) is swapped in place instead. ``assets`` are
+    files or directories watched every ``intervalMs``. Before reloading,
+    the page dispatches a cancelable ``lam:live-reload`` window event
+    (``detail.reason``: ``server``, ``assets`` or ``styles``); the window
+    scroll position is restored after the reload. -#
+
+    static func enabled() -> bool {
+        #- True when the process runs under ``lamc dev`` (``LAMC_DEV=1``). -#
+        return Env.getOr("LAMC_DEV", "") == "1"
+    }
+
+    func init(self, assets: list[str] = [], path: str = LiveReloadPath, intervalMs: int = 500) {
+        self.assets: list[str] = assets
+        self.path: str = path
+        self.intervalMs: int = max(intervalMs, 50)
+        self.boot: str = str(Time.nowUnixNano())
+    }
+
+    func register(self, srv: Server) {
+        srv.get(self.path, self.events)
+        srv.get(self.path + ".js", self.script)
+        srv.onSend(self.inject)
+    }
+
+    func tag(self) -> str {
+        #- The script element the ``onSend`` hook inserts. -#
+        return f"<script src=\"{self.path}.js\" data-endpoint=\"{self.path}\" data-boot=\"{self.boot}\" defer></script>"
+    }
+
+    func script(self, _req: Request, res: Response) {
+        res.headers["Cache-Control"] = "no-store"
+        res.type_("application/javascript; charset=utf-8").send(LiveReloadScript)
+    }
+
+    func events(self, _req: Request, res: Response) {
+        res.headers["X-Accel-Buffering"] = "no"
+        res.sse(self.stream)
+    }
+
+    func stream(self, emitter: SseEmitter) {
+        emitter.sendEvent("boot", self.boot)
+        reported: dict[str, str] = self.snapshot()
+        previous: dict[str, str] = reported
+        quietMs: int = 0
+        while not emitter.wait(self.intervalMs) {
+            current: dict[str, str] = self.snapshot()
+            changed: list[str] = LiveReload.changes(reported, current)
+            if len(changed) > 0 and len(LiveReload.changes(previous, current)) == 0 {
+                if changed.all(lambda name: name.endsWith(".css")) {
+                    emitter.sendEvent("styles", ",".join([Path.base(name) for name in changed]))
+                } else {
+                    emitter.sendEvent("reload", str(len(changed)))
+                }
+                reported = current
+                quietMs = 0
+            }
+            previous = current
+            quietMs += self.intervalMs
+            if quietMs >= HeartbeatMs {
+                emitter.comment("ping")
+                quietMs = 0
+            }
+        }
+    }
+
+    func snapshot(self) -> dict[str, str] {
+        #- Content hash of every watched file. Hashes, not modification
+        times: they are stable across editors that rewrite files in place. -#
+        stamps: dict[str, str] = {}
+        for root in self.assets {
+            for file in Os.walk(root).unwrapOr([]) {
+                stamps[file] = Hash.sha256(Os.readFile(file).unwrapOr(""))
+            }
+        }
+        return stamps
+    }
+
+    static func changes(before: dict[str, str], after: dict[str, str]) -> list[str] {
+        changed: list[str] = [name for name, stamp in after if name not in before or before[name] != stamp]
+        return sorted(changed + [name for name, _ in before if name not in after])
+    }
+
+    func inject(self, _req: Request, res: Response) {
+        if "Content-Type" not in res.headers or "text/html" not in res.headers["Content-Type"].toLower() {
+            return
+        }
+        at: int = res.body.lastIndex("</body>")
+        if at < 0 or self.path + ".js" in res.body {
+            return
+        }
+        res.body = res.body[:at] + self.tag() + res.body[at:]
+        if "Content-Length" in res.headers {
+            res.headers["Content-Length"] = str(len(res.body))
+        }
+    }
+}
+
+func liveReload(srv: Server, assets: list[str] = [], path: str = LiveReloadPath,
+    intervalMs: int = 500, force: bool = false) {
+    #- Register browser live reload when the server runs under ``lamc dev``
+    (or ``force`` is true); otherwise do nothing. -#
+    if force or LiveReload.enabled() {
+        LiveReload(assets, path, intervalMs).register(srv)
+    }
+}
+
+func liveReloadPlugin(assets: list[str] = [], path: str = LiveReloadPath,
+    intervalMs: int = 500, force: bool = false) -> func(Server) {
+    return lambda(srv: Server) -> None {
+        liveReload(srv, assets, path, intervalMs, force)
+    }
+}
