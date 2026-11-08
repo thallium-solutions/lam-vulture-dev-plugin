@@ -1,14 +1,19 @@
 # Test: the live reload event stream over a real listener. The stream
 # announces the server's boot id, swaps stylesheets on .css changes,
 # reloads on other asset changes (after the files settle), ignores
-# unchanged files, and ends promptly on a graceful shutdown.
+# unchanged files, and ends promptly on a graceful shutdown. A second
+# stream (a tab without Web Locks, or a new leader) gets the boot id too,
+# and a restarted server announces a new one.
 #
 # expect: boot matches tag: true
 # expect: styles event: styles app.css
 # expect: reload event: reload 1
 # expect: mixed change: reload 2
 # expect: quiet without changes: true
+# expect: second stream boot: true
 # expect: shutdown prompt: true
+# expect: restart announces a new boot: true
+# expect: restarted shutdown prompt: true
 # expect: ok
 
 from @lam/vulture import Server
@@ -100,10 +105,28 @@ func main() {
 
     print(f"quiet without changes: {nextEvent(400) == 'timeout'}")
 
+    go! {
+        liveListen("http://127.0.0.1:18791/__lam/live-reload")
+    }
+    print(f"second stream boot: {nextEvent(3000) == 'boot ' + live.boot}")
+
     begun: int = Time.nowUnixMilli()
     srv.shutdown(5000)
     took: int = Time.nowUnixMilli() - begun
-    print(f"shutdown prompt: {took < 2000 and nextEvent(3000) == 'closed'}")
+    print(f"shutdown prompt: {took < 2000 and nextEvent(3000) == 'closed' and nextEvent(3000) == 'closed'}")
+
+    restarted: LiveReload = LiveReload([root], "/__lam/live-reload", 50)
+    again: Server = Server()
+    restarted.register(again)
+    _ = again.listenBackground(18791).unwrap()
+    go! {
+        liveListen("http://127.0.0.1:18791/__lam/live-reload")
+    }
+    print(f"restart announces a new boot: {nextEvent(3000) == 'boot ' + restarted.boot and restarted.boot != live.boot}")
+    begun = Time.nowUnixMilli()
+    again.shutdown(5000)
+    took = Time.nowUnixMilli() - begun
+    print(f"restarted shutdown prompt: {took < 2000 and nextEvent(3000) == 'closed'}")
     _ = Os.removeAll(root)
     print("ok")
 }

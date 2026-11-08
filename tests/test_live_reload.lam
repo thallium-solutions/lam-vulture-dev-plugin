@@ -5,6 +5,9 @@
 # expect: under lamc dev: enabled=true events-js=200
 # expect: forced routes: js=200 type=application/javascript; charset=utf-8 cache=no-store
 # expect: script reloads on boot change: true
+# expect: script shares one stream: lock=true channel=true relay=true fallback=true
+# expect: script leaves on pagehide: true before navigating: true rejoins from bfcache: true
+# expect: script keeps events and reconnect: true
 # expect: document: injected=true before-body=true once=true
 # expect: content-length follows: true
 # expect: fragment untouched: true
@@ -62,10 +65,24 @@ func main() {
     print(f"under lamc dev: enabled={LiveReload.enabled()} events-js={dev.inject('GET', LiveReloadPath + '.js').status}")
     _ = Env.unset("LAMC_DEV")
 
-    srv: Server = server(liveReloadPlugin(force = true))
+    srv: Server = server(liveReloadPlugin(force=true))
     js: InjectResponse = srv.inject("GET", LiveReloadPath + ".js")
     print(f"forced routes: js={js.status} type={js.header('Content-Type')} cache={js.header('Cache-Control')}")
-    print(f"script reloads on boot change: {'event.data !== boot' in js.body and 'location.reload()' in js.body}")
+    print(f"script reloads on boot change: {'data !== boot' in js.body and 'location.reload()' in js.body}")
+    # One stream per browser and origin (the 6-connection HTTP/1.1 limit):
+    # a Web Locks leader reads it and relays over a BroadcastChannel; without
+    # either API every tab keeps its own EventSource.
+    lock: bool = "navigator.locks.request(name" in js.body
+    channel: bool = "new BroadcastChannel(name)" in js.body
+    relay: bool = "postMessage(" in js.body and "\"hello\"" in js.body
+    fallback: bool = "navigator.locks && window.BroadcastChannel" in js.body
+    print(f"script shares one stream: lock={lock} channel={channel} relay={relay} fallback={fallback}")
+    leaves: bool = "addEventListener(\"pagehide\"" in js.body and "source.close()" in js.body
+    early: bool = "addEventListener(\"beforeunload\"" in js.body
+    rejoins: bool = "addEventListener(\"pageshow\"" in js.body and "event.persisted" in js.body
+    print(f"script leaves on pagehide: {leaves} before navigating: {early} rejoins from bfcache: {rejoins}")
+    kept: list[str] = ["\"lam:live-reload\"", "cancelable: true", "\"lam:live-styles\"", "lam-live-reload", "window.scrollTo", "setTimeout(open, 300)"]
+    print(f"script keeps events and reconnect: {kept.all(lambda text: text in js.body)}")
 
     doc: str = srv.inject("GET", "/").body
     tag: str = f"<script src=\"{LiveReloadPath}.js\""

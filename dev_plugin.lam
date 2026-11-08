@@ -56,14 +56,93 @@ const LiveReloadScript: str = """(() => {
     }
     window.dispatchEvent(new CustomEvent("lam:live-styles", { detail: { names: wanted } }));
   };
-  const connect = () => {
-    const source = new EventSource(endpoint);
-    source.addEventListener("boot", (event) => { if (event.data !== boot) reload("server"); });
-    source.addEventListener("reload", () => reload("assets"));
-    source.addEventListener("styles", (event) => swapStyles(event.data));
-    source.onerror = () => { source.close(); setTimeout(connect, 300); };
+  const handle = (type, data) => {
+    if (type === "boot") { if (data !== boot) reload("server"); }
+    else if (type === "reload") reload("assets");
+    else if (type === "styles") swapStyles(data);
   };
-  connect();
+  // Browsers open at most 6 HTTP/1.1 connections per host and an open
+  // stream holds one, so tabs share a single stream: the tab holding the
+  // Web Lock reads it and relays its events over a BroadcastChannel.
+  // Without either API (Web Locks need a secure context) every tab keeps
+  // its own stream.
+  const name = "lam-live-reload " + endpoint;
+  const shared = !!(navigator.locks && window.BroadcastChannel);
+  const id = Math.random().toString(36).slice(2);
+  let source = null;
+  let retry = 0;
+  let current = null;
+  const stream = (relay) => {
+    const open = () => {
+      source = new EventSource(endpoint);
+      for (const type of ["boot", "reload", "styles"]) {
+        source.addEventListener(type, (event) => {
+          if (type === "boot") current = event.data;
+          if (relay) relay.postMessage({ type, data: event.data });
+          handle(type, event.data);
+        });
+      }
+      source.onerror = () => { stop(); retry = setTimeout(open, 300); };
+    };
+    const stop = () => {
+      clearTimeout(retry);
+      if (source) source.close();
+      source = null;
+      current = null;
+    };
+    open();
+    return stop;
+  };
+  let leave = null;
+  const join = () => {
+    if (!shared) {
+      leave = stream(null);
+      return;
+    }
+    const channel = new BroadcastChannel(name);
+    const pending = new AbortController();
+    let stop = null;
+    let release = null;
+    channel.onmessage = ({ data }) => {
+      // A tab that joins asks the leader for the boot id of the server it
+      // streams from; it reloads if its page came from an older server.
+      if (data.type === "hello") {
+        if (current !== null) channel.postMessage({ type: "boot", data: current, to: data.from });
+      } else if (!data.to || data.to === id) handle(data.type, data.data);
+    };
+    navigator.locks.request(name, { signal: pending.signal }, () => {
+      if (pending.signal.aborted) return;
+      stop = stream(channel);
+      return new Promise((resolve) => { release = resolve; });
+    }).catch(() => {});
+    channel.postMessage({ type: "hello", from: id });
+    leave = () => {
+      pending.abort();
+      if (stop) stop();
+      if (release) release();
+      channel.close();
+    };
+  };
+  // Leaving the page (navigation, reload, close, back/forward cache) frees
+  // the connection and the lock at once, so a waiting tab or the next page
+  // takes over; a page restored from the back/forward cache joins again.
+  window.addEventListener("pagehide", () => {
+    if (leave) leave();
+    leave = null;
+  });
+  // Chrome does not deliver a close made in pagehide when a history
+  // traversal puts the page into the back/forward cache (the connection
+  // stays open until the page is restored), so let go before navigating
+  // too; if no navigation follows (cancelled, a download), join again.
+  window.addEventListener("beforeunload", () => {
+    if (leave) leave();
+    leave = null;
+    setTimeout(() => { if (!leave) join(); }, 1000);
+  });
+  window.addEventListener("pageshow", (event) => {
+    if (event.persisted && !leave) join();
+  });
+  join();
 })();
 """
 
@@ -79,7 +158,14 @@ class LiveReload {
     files or directories watched every ``intervalMs``. Before reloading,
     the page dispatches a cancelable ``lam:live-reload`` window event
     (``detail.reason``: ``server``, ``assets`` or ``styles``); the window
-    scroll position is restored after the reload. -#
+    scroll position is restored after the reload.
+
+    The pages of one browser share a single stream (browsers open at most
+    6 HTTP/1.1 connections per host): the tab holding a Web Lock reads it
+    and relays its events to the others over a ``BroadcastChannel``;
+    without either API each page opens its own. Pages let go of the stream
+    when they are left and join again when restored from the back/forward
+    cache. -#
 
     static func enabled() -> bool {
         #- True when the process runs under ``lamc dev`` (``LAMC_DEV=1``). -#
@@ -183,7 +269,7 @@ func liveReload(srv: Server, assets: list[str] = [], path: str = LiveReloadPath,
 
 func liveReloadPlugin(assets: list[str] = [], path: str = LiveReloadPath,
     intervalMs: int = 500, force: bool = false) -> func(Server) {
-    return lambda(srv: Server) -> None {
+    return lambda (srv: Server) -> None {
         liveReload(srv, assets, path, intervalMs, force)
     }
 }

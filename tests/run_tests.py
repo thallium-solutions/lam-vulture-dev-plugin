@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shutil
 import subprocess
@@ -25,6 +26,15 @@ IGNORES = shutil.ignore_patterns(
     "__pycache__",
     "*.pyc",
 )
+# Optional real-browser test: headless Google Chrome driven by a Node
+# script over the DevTools protocol, against a server built from a Lam
+# program using the installed package. Skipped when Chrome or Node is
+# missing.
+BROWSER_TEST = ROOT / "tests" / "browser" / "live_reload.test.mjs"
+BROWSER_SERVER = ROOT / "tests" / "browser" / "live_reload_server.lam"
+BROWSER_TIMEOUT = 200
+
+
 def run_command(
     command: list[str], *, cwd: Path, timeout: int
 ) -> subprocess.CompletedProcess[str]:
@@ -157,6 +167,60 @@ def run_case(
     return True, "ok"
 
 
+def browser_tools() -> tuple[str | None, str | None, str]:
+    """Return (node, chrome, reason); reason is set when one is missing."""
+    node = shutil.which(os.environ.get("NODE", "node"))
+    chrome = shutil.which(os.environ.get("CHROME", "google-chrome"))
+    if node is None:
+        return None, chrome, "node not found"
+    try:
+        version = run_command([node, "--version"], cwd=ROOT, timeout=15).stdout.strip().split("\n")[0]
+    except (OSError, subprocess.TimeoutExpired):
+        version = ""
+    match = re.match(r"v(\d+)\.", version)
+    if match is None or int(match.group(1)) < 22:
+        return None, chrome, f"Node 22 or newer needed (built-in WebSocket), found {version or 'unknown'}"
+    if chrome is None:
+        return node, None, "google-chrome not found (set CHROME to another Chrome binary)"
+    return node, chrome, ""
+
+
+def run_browser_case(
+    node: str, chrome: str, extlibs: Path, output_root: Path
+) -> tuple[bool, str]:
+    binary = output_root / "browser__live_reload_server.bin"
+    command = [
+        COMPILER,
+        "build",
+        str(BROWSER_SERVER),
+        "--extlibs",
+        str(extlibs),
+        "--no-cache",
+        "-o",
+        str(binary),
+    ]
+    try:
+        compiled = run_command(command, cwd=output_root, timeout=300)
+    except subprocess.TimeoutExpired:
+        return False, "COMPILE FAIL: timed out after 300 seconds"
+    except OSError as exc:
+        return False, f"COMPILE FAIL: {exc}"
+    if compiled.returncode != 0:
+        return False, failure_details("COMPILE FAIL", compiled)
+
+    command = [node, str(BROWSER_TEST), "--server", str(binary), "--chrome", chrome]
+    try:
+        executed = run_command(command, cwd=output_root, timeout=BROWSER_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return False, f"RUN FAIL: timed out after {BROWSER_TIMEOUT} seconds"
+    except OSError as exc:
+        return False, f"RUN FAIL: {exc}"
+    report = executed.stdout.rstrip()
+    if executed.returncode != 0:
+        return False, failure_details("BROWSER FAIL", executed)
+    return True, report
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="@lam/vulture/dev-plugin test runner")
     parser.add_argument("--verbose", "-v", action="store_true", help="show full failures")
@@ -167,6 +231,11 @@ def main() -> int:
         default=DEFAULT_VULTURE_ROOT,
         help=f"@lam/vulture checkout (default: {DEFAULT_VULTURE_ROOT})",
     )
+    parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="skip the headless Chrome test (tests/browser/)",
+    )
     args = parser.parse_args()
 
     if not require_compiler():
@@ -176,14 +245,18 @@ def main() -> int:
         return 1
 
     cases = sorted(path for path in (ROOT / "tests").rglob("test_*.lam") if path.is_file())
+    browser = not args.no_browser
     if args.filter:
         needle = args.filter.lower()
         cases = [case for case in cases if needle in str(case.relative_to(ROOT)).lower()]
-    if not cases:
+        browser = browser and needle in str(BROWSER_TEST.relative_to(ROOT)).lower()
+    if not cases and not browser:
         print("error: no matching Lam test cases found", file=sys.stderr)
         return 2
 
     failures: list[tuple[Path, str]] = []
+    skipped = 0
+    total = len(cases) + (1 if browser else 0)
     with tempfile.TemporaryDirectory(prefix="lam-vulture-dev-plugin-tests-") as temporary:
         temporary_root = Path(temporary)
         extlibs = temporary_root / "extlibs"
@@ -195,7 +268,7 @@ def main() -> int:
             print(f"error: unable to stage packages: {exc}", file=sys.stderr)
             return 1
 
-        print(f"Running {len(cases)} @lam/vulture/dev-plugin test(s)...\n")
+        print(f"Running {total} @lam/vulture/dev-plugin test(s)...\n")
         for case in cases:
             relative = case.relative_to(ROOT)
             ok, message = run_case(case, extlibs, outputs)
@@ -206,8 +279,25 @@ def main() -> int:
                     for line in message.splitlines():
                         print(f"        {line}")
 
-    passed = len(cases) - len(failures)
-    print(f"\nResults: {passed} passed, {len(failures)} failed, {len(cases)} total")
+        if browser:
+            relative = BROWSER_TEST.relative_to(ROOT)
+            node, chrome, reason = browser_tools()
+            if node is None or chrome is None:
+                skipped += 1
+                print(f"  SKIP  {relative} ({reason})")
+            else:
+                ok, message = run_browser_case(node, chrome, extlibs, outputs)
+                print(f"  {'PASS' if ok else 'FAIL'}  {relative}")
+                if not ok:
+                    failures.append((relative, message))
+                if args.verbose or not ok:
+                    for line in message.splitlines():
+                        print(f"        {line}")
+
+    passed = total - len(failures) - skipped
+    print(
+        f"\nResults: {passed} passed, {len(failures)} failed, {skipped} skipped, {total} total"
+    )
     if failures and not args.verbose:
         print("Re-run with --verbose for failure details.")
     return 1 if failures else 0

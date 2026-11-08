@@ -1,0 +1,26 @@
+# Test server for the browser test (tests/browser/live_reload.test.mjs).
+# Not a test case of its own: tests/run_tests.py builds it against the
+# staged extlibs tree and hands the binary to the Node script. PORT selects
+# the port; the working directory holds assets/app.css, served under
+# /assets and watched by the live reload plugin (forced on).
+
+from @lam/vulture import Server, Request, Response
+from @lam/vulture/dev-plugin import liveReloadPlugin
+from lamenv import Env
+
+const Page: str = "<!doctype html><html><head><title>live reload</title><link rel=\"stylesheet\" href=\"/assets/app.css\"></head><body><main>page</main><a href=\"/next\">next</a></body></html>"
+
+class Pages {
+    static func page(_req: Request, res: Response) {
+        res.html(Page)
+    }
+}
+
+func main() {
+    srv: Server = Server()
+    srv.register(liveReloadPlugin(["assets"], intervalMs=100, force=true))
+    srv.static_("/assets", "assets")
+    srv.get("/", Pages.page)
+    srv.get("/next", Pages.page)
+    _ = srv.listen(int(Env.getOr("PORT", "18792")))
+}
