@@ -18,7 +18,7 @@ loop.
 ## Requirements
 
 - `lamc` 4.8.0 or newer (`>=4.8.0, <5`: `Os.modTime`); `lamc dev` comes with 4.5.0.
-- `@lam/vulture` 3.6.0 (`SseEmitter.wait`), installed transitively.
+- `@lam/vulture` 3.7.0 (`SseEmitter.wait` since 3.6.0), installed transitively.
 
 ## Installation
 

@@ -2,6 +2,13 @@
 
 All notable changes to `@lam/vulture/dev-plugin` are documented here.
 
+## [1.2.1] - 2026-11-09
+
+### Changed
+
+- Pins `@lam/vulture` 3.7.0 (json bodies encoded once), so a project can
+  depend on both.
+
 ## [1.2.0] - 2026-11-09
 
 ### Fixed
