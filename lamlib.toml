@@ -1,6 +1,6 @@
 [library]
 name = "@lam/vulture/dev-plugin"
-version = "1.1.0"
+version = "1.2.0"
 description = "Development helpers for @lam/vulture: browser live reload for lamc dev"
 license = "Apache-2.0"
 authors = ["Lammergeier contributors"]
@@ -8,7 +8,7 @@ homepage = "https://github.com/thallium-solutions/lam-vulture-dev-plugin"
 repository = "https://github.com/thallium-solutions/lam-vulture-dev-plugin"
 
 [compatibility]
-lamc = ">=4.0, <5"
+lamc = ">=4.8.0, <5"
 
 [dependencies]
 "@lam/vulture" = { git = "https://github.com/thallium-solutions/lam-vulture.git", ref = "3.6.0" }

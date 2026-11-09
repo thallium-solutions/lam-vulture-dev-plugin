@@ -17,7 +17,7 @@ loop.
 
 ## Requirements
 
-- `lamc` 4.0 or newer (`>=4.0, <5`); `lamc dev` comes with 4.5.0.
+- `lamc` 4.8.0 or newer (`>=4.8.0, <5`: `Os.modTime`); `lamc dev` comes with 4.5.0.
 - `@lam/vulture` 3.6.0 (`SseEmitter.wait`), installed transitively.
 
 ## Installation
@@ -71,9 +71,13 @@ What `register` adds:
 - `GET <path>`: a Server-Sent Events stream. It sends `boot` (an id of this
   server process) on connect, `styles` with the changed stylesheet file names
   when only `.css` files changed, and `reload` when other watched assets
-  changed. Assets are files or directories (recursive) hashed every
-  `intervalMs`; a change is reported once the files are the same on two
-  consecutive polls, so half-written files do not trigger. The stream ends when
+  changed. Assets are files or directories (recursive) checked every
+  `intervalMs` by content hash; a file is read and hashed again only when its
+  size or modification time changed or it was modified in the last 2 seconds,
+  and the hashes are shared by every stream (`live.reads` counts the files
+  read), so an idle tab costs a directory walk, not a read of every asset. A
+  change is reported once the files are the same on two consecutive polls, so
+  half-written files do not trigger. The stream ends when
   the client leaves or the server shuts down (`SseEmitter.wait`), so graceful
   shutdowns stay fast.
 - `GET <path>.js`: the browser script (`no-store`).

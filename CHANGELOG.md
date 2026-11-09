@@ -2,6 +2,28 @@
 
 All notable changes to `@lam/vulture/dev-plugin` are documented here.
 
+## [1.2.0] - 2026-11-09
+
+### Fixed
+
+- An open page no longer makes the server read every watched asset twice a
+  second. Each stream read and hashed all the files every `intervalMs`
+  (Luxyt: 5.1 MB, mostly a 4.9 MB bundle, every 500 ms: about 10 MB/s
+  allocated while a tab was open, 15% of everything a load test allocated).
+  `snapshot()` now reads a file only when its size or modification time
+  changed, or when it was modified in the last 2 seconds (a rewrite within
+  one tick of the file system's clock); the hashes are shared by the streams.
+  Changes are still detected by content, so an editor rewriting a file
+  unchanged reloads nothing.
+
+### Added
+
+- `LiveReload.reads`: the files `snapshot()` has read so far.
+
+### Changed
+
+- Requires lamc 4.8.0 (`Os.modTime`).
+
 ## [1.1.0] - 2026-11-08
 
 ### Fixed

@@ -14,12 +14,70 @@
 # expect: json untouched: true
 # expect: custom path: /dev/reload.js tag=true
 # expect: changes: [a.css b.js c.css]
+# expect: snapshot reads every file once: reads=2
+# expect: unchanged files are not read again: reads=2 same=true
+# expect: a rewrite of the same size is read: reads=3 changed=[a.css]
+# expect: a rewrite with the same content changes nothing: reads=4 changed=[]
+# expect: a file modified in the last 2 s is read every time: reads=6
+# expect: a removed file leaves the snapshot: changed=[b.js] files=2
 # expect: ok
 
 from @lam/vulture import Server, Request, Response, InjectResponse
 from @lam/vulture/dev-plugin import LiveReload, LiveReloadPath, liveReload, liveReloadPlugin
 from lamenv import Env
 from lamos import Os
+from lampath import Path
+from lamtime import Time
+
+go! {
+    import (
+        "os"
+        "time"
+    )
+}
+
+func age(path: str, seconds: int) {
+    #- Sets the modification time of ``path`` to ``seconds`` ago. -#
+    go! {
+        at := time.Now().Add(-time.Duration(seconds) * time.Second)
+        os.Chtimes(path, at, at)
+    }
+}
+
+func checkSnapshots() {
+    root: str = Os.tempDir() + "/lam-live-snapshot-" + str(Time.nowUnixNano())
+    _ = Os.mkdir(root)
+    _ = Os.writeFile(root + "/a.css", "body{1}")
+    _ = Os.writeFile(root + "/b.js", "1")
+    age(root + "/a.css", 3600)
+    age(root + "/b.js", 3600)
+    live: LiveReload = LiveReload([root], "/__lam/live-reload", 50)
+
+    first: dict[str, str] = live.snapshot()
+    print(f"snapshot reads every file once: reads={live.reads}")
+    second: dict[str, str] = live.snapshot()
+    print(f"unchanged files are not read again: reads={live.reads} same={first == second}")
+
+    _ = Os.writeFile(root + "/a.css", "body{2}")
+    age(root + "/a.css", 1800)
+    third: dict[str, str] = live.snapshot()
+    print(f"a rewrite of the same size is read: reads={live.reads} changed=[{' '.join([Path.base(f) for f in LiveReload.changes(second, third)])}]")
+
+    _ = Os.writeFile(root + "/a.css", "body{2}")
+    age(root + "/a.css", 900)
+    fourth: dict[str, str] = live.snapshot()
+    print(f"a rewrite with the same content changes nothing: reads={live.reads} changed=[{' '.join(LiveReload.changes(third, fourth))}]")
+
+    _ = Os.writeFile(root + "/c.js", "fresh")
+    _ = live.snapshot()
+    fifth: dict[str, str] = live.snapshot()
+    print(f"a file modified in the last 2 s is read every time: reads={live.reads}")
+
+    _ = Os.remove(root + "/b.js")
+    sixth: dict[str, str] = live.snapshot()
+    print(f"a removed file leaves the snapshot: changed=[{' '.join([Path.base(f) for f in LiveReload.changes(fifth, sixth)])}] files={len(sixth)}")
+    _ = Os.removeAll(root)
+}
 
 const Document: str = "<!doctype html><html><head><title>t</title></head><body><main>hi</main></body></html>"
 
@@ -101,5 +159,6 @@ func main() {
     before: dict[str, str] = {"a.css": "1", "b.js": "1", "same": "x"}
     after: dict[str, str] = {"b.js": "2", "c.css": "1", "same": "x"}
     print(f"changes: [{' '.join(LiveReload.changes(before, after))}]")
+    checkSnapshots()
     print("ok")
 }

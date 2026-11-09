@@ -16,7 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_VULTURE_ROOT = ROOT.parent / "lam-vulture"
 COMPILER = "lamc"
-MIN_COMPILER_VERSION = (4, 0, 0)
+MIN_COMPILER_VERSION = (4, 8, 0)
 VERSION_PATTERN = re.compile(r"(?:lamc\s+)?v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?")
 IGNORES = shutil.ignore_patterns(
     ".git",

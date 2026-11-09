@@ -7,6 +7,7 @@
 # unconditionally.
 
 from @lam/vulture import Server, Request, Response, SseEmitter
+from lamconcurrency import Mutex
 from lamenv import Env
 from lamhash import Hash
 from lamos import Os
@@ -15,6 +16,20 @@ from lamtime import Time
 
 const LiveReloadPath: str = "/__lam/live-reload"
 const HeartbeatMs: int = 15000
+const RecentNs: int = 2000000000
+
+#- What ``LiveReload.snapshot`` knows of a watched file. -#
+class AssetStamp {
+    func init(self, size: int, modTime: int, hash: str) {
+        self.size: int = size
+        self.modTime: int = modTime
+        self.hash: str = hash
+    }
+
+    func matches(self, size: int, modTime: int) -> bool {
+        return self.size == size and self.modTime == modTime
+    }
+}
 
 const LiveReloadScript: str = """(() => {
   const script = document.currentScript;
@@ -177,6 +192,10 @@ class LiveReload {
         self.path: str = path
         self.intervalMs: int = max(intervalMs, 50)
         self.boot: str = str(Time.nowUnixNano())
+        self.known: dict[str, AssetStamp] = {}
+        self.lock: Mutex = Mutex()
+        #- Files read and hashed by ``snapshot`` so far. -#
+        self.reads: int = 0
     }
 
     func register(self, srv: Server) {
@@ -228,13 +247,31 @@ class LiveReload {
 
     func snapshot(self) -> dict[str, str] {
         #- Content hash of every watched file. Hashes, not modification
-        times: they are stable across editors that rewrite files in place. -#
+        times: they are stable across editors that rewrite files in place.
+        A file is read again only when its size or modification time
+        changed, or when it was modified in the last ``RecentNs`` (a
+        rewrite within one tick of the file system's clock keeps its time);
+        the other hashes come from the previous snapshots, shared by every
+        stream. -#
+        self.lock.lock()
+        defer self.lock.unlock()
+        recent: int = Time.nowUnixNano() - RecentNs
+        known: dict[str, AssetStamp] = {}
         stamps: dict[str, str] = {}
         for root in self.assets {
             for file in Os.walk(root).unwrapOr([]) {
-                stamps[file] = Hash.sha256(Os.readFile(file).unwrapOr(""))
+                size: int = Os.fileSize(file).unwrapOr(-1)
+                modTime: int = Os.modTime(file).unwrapOr(0)
+                if file in self.known and self.known[file].matches(size, modTime) and modTime <= recent {
+                    known[file] = self.known[file]
+                } else {
+                    known[file] = AssetStamp(size, modTime, Hash.sha256(Os.readFile(file).unwrapOr("")))
+                    self.reads += 1
+                }
+                stamps[file] = known[file].hash
             }
         }
+        self.known = known
         return stamps
     }
 
