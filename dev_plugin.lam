@@ -220,8 +220,11 @@ class LiveReload {
     }
 
     func stream(self, emitter: SseEmitter) {
-        emitter.sendEvent("boot", self.boot)
+        # Snapshot first, then announce: every change made after the client
+        # received `boot` is then reported (sent first, a change made right
+        # after `boot` could land in this snapshot and never be reported).
         reported: dict[str, str] = self.snapshot()
+        emitter.sendEvent("boot", self.boot)
         previous: dict[str, str] = reported
         quietMs: int = 0
         while not emitter.wait(self.intervalMs) {

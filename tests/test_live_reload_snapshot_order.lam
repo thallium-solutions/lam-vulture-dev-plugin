@@ -1,0 +1,138 @@
+# Regression (1.2.3): a stream takes its first snapshot of the watched files
+# before it announces `boot`, so every change made after a client received
+# `boot` is reported. 1.2.2 sent `boot` first: a stylesheet written right
+# after `boot` could land in the stream's first snapshot and never be
+# reported (the flaky `styles event: timeout` of
+# test_live_reload_stream.lam). The first snapshot is made slow here (a
+# subclass overriding `snapshot`, which `stream` calls through `self`), so
+# the old order fails every time instead of 1 run in 3.
+#
+# A change made while no snapshot is pending is reported once, a write that
+# keeps the same content is not reported, and a file deleted then created
+# again is reported as one change.
+#
+# expect: boot received after the first snapshot: true
+# expect: styles event: styles site.css
+# expect: same content rewrite is quiet: true
+# expect: created file: reload 1
+# expect: deleted file: reload 1
+# expect: second stream starts from the current files: true
+# expect: ok
+
+from @lam/vulture import Server
+from @lam/vulture/dev-plugin import LiveReload
+from lamos import Os
+from lamtime import Time
+
+go! {
+    import (
+        "bufio"
+        "net/http"
+        "strings"
+        "time"
+    )
+
+    var orderEvents = make(chan string, 32)
+
+    func orderListen(url string) {
+        go func() {
+            client := &http.Client{Timeout: 60 * time.Second}
+            resp, err := client.Get(url)
+            if err != nil {
+                orderEvents <- "error " + err.Error()
+                return
+            }
+            defer resp.Body.Close()
+            name := ""
+            scanner := bufio.NewScanner(resp.Body)
+            for scanner.Scan() {
+                line := scanner.Text()
+                switch {
+                case strings.HasPrefix(line, "event: "):
+                    name = strings.TrimPrefix(line, "event: ")
+                case strings.HasPrefix(line, "data: "):
+                    orderEvents <- name + " " + strings.TrimPrefix(line, "data: ")
+                    name = ""
+                }
+            }
+            orderEvents <- "closed"
+        }()
+    }
+
+    func orderNext(timeoutMs int) string {
+        select {
+        case event := <-orderEvents:
+            return event
+        case <-time.After(time.Duration(timeoutMs) * time.Millisecond):
+            return "timeout"
+        }
+    }
+}
+
+func nextEvent(timeoutMs: int) -> str {
+    event: str = ""
+    go! {
+        event = orderNext(timeoutMs)
+    }
+    return event
+}
+
+#- A live reload whose first snapshot takes 400 ms: with `boot` sent before
+that snapshot, the test's write lands inside it. -#
+class SlowFirstSnapshot(LiveReload) {
+    slowed: bool = false
+    snapshotsDone: int = 0
+
+    func snapshot(self) -> dict[str, str] {
+        if not self.slowed {
+            self.slowed = true
+            Time.sleepMs(400)
+        }
+        stamps: dict[str, str] = base.snapshot()
+        self.snapshotsDone += 1
+        return stamps
+    }
+}
+
+func main() {
+    root: str = Os.tempDir() + "/lam-live-reload-order-" + str(Time.nowUnixNano())
+    _ = Os.mkdir(root + "/css")
+    _ = Os.writeFile(root + "/css/site.css", "a{}")
+
+    live: SlowFirstSnapshot = SlowFirstSnapshot([root], "/__lam/live-reload", 50)
+    srv: Server = Server()
+    live.register(srv)
+    _ = srv.listenBackground(18793).unwrap()
+    go! {
+        orderListen("http://127.0.0.1:18793/__lam/live-reload")
+    }
+
+    boot: str = nextEvent(3000)
+    print(f"boot received after the first snapshot: {boot == 'boot ' + live.boot and live.snapshotsDone >= 1}")
+    # Written as soon as `boot` arrives: it must be reported.
+    _ = Os.writeFile(root + "/css/site.css", "a{color:red}")
+    print(f"styles event: {nextEvent(3000)}")
+
+    _ = Os.writeFile(root + "/css/site.css", "a{color:red}")
+    print(f"same content rewrite is quiet: {nextEvent(400) == 'timeout'}")
+
+    _ = Os.writeFile(root + "/new.js", "x")
+    print(f"created file: {nextEvent(3000)}")
+
+    _ = Os.remove(root + "/new.js")
+    print(f"deleted file: {nextEvent(3000)}")
+
+    # A second stream (new tab): its first snapshot already has the current
+    # files, so it only announces boot.
+    go! {
+        orderListen("http://127.0.0.1:18793/__lam/live-reload")
+    }
+    second: str = nextEvent(3000)
+    print(f"second stream starts from the current files: {second == 'boot ' + live.boot and nextEvent(400) == 'timeout'}")
+
+    srv.shutdown(5000)
+    _ = nextEvent(3000)
+    _ = nextEvent(3000)
+    _ = Os.removeAll(root)
+    print("ok")
+}

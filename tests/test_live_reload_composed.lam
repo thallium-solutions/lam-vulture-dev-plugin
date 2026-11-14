@@ -1,0 +1,178 @@
+# Cross-feature: one LiveReload watching several roots (a nested directory,
+# non-ASCII file names, a root that does not exist) served to several
+# concurrent streams (tabs without Web Locks). Each stream is a `Tab`
+# object; its next event is awaited from async tasks started together, and
+# the outcomes are compared with comprehensions. Also: the interval floor,
+# injection into an upper-case `TEXT/HTML` response and before the last
+# `</body>` only, and a prompt end of every stream on shutdown.
+#
+# expect: interval floor: 50
+# expect: watched files: 3 (missing root ignored)
+# expect: three tabs booted: true
+# expect: stylesheets swapped in every tab: [styles theme.css,ñandú.css styles theme.css,ñandú.css styles theme.css,ñandú.css]
+# expect: nested script reloads every tab: true reload 1
+# expect: renamed stylesheet reloads: reload 2
+# expect: upper-case TEXT/HTML injected: true before the last body: true
+# expect: every tab closed on shutdown: true
+# expect: ok
+
+from @lam/vulture import Server, Request, Response, InjectResponse
+from @lam/vulture/dev-plugin import LiveReload
+from lamos import Os
+from lamtime import Time
+
+go! {
+    import (
+        "bufio"
+        "net/http"
+        "strings"
+        "sync"
+        "time"
+    )
+
+    var tabMu sync.Mutex
+    var tabEvents = map[int]chan string{}
+
+    func tabChannel(id int) chan string {
+        tabMu.Lock()
+        defer tabMu.Unlock()
+        ch, ok := tabEvents[id]
+        if !ok {
+            ch = make(chan string, 32)
+            tabEvents[id] = ch
+        }
+        return ch
+    }
+
+    func tabListen(id int, url string) {
+        ch := tabChannel(id)
+        go func() {
+            client := &http.Client{Timeout: 60 * time.Second}
+            resp, err := client.Get(url)
+            if err != nil {
+                ch <- "error " + err.Error()
+                return
+            }
+            defer resp.Body.Close()
+            name := ""
+            scanner := bufio.NewScanner(resp.Body)
+            for scanner.Scan() {
+                line := scanner.Text()
+                switch {
+                case strings.HasPrefix(line, "event: "):
+                    name = strings.TrimPrefix(line, "event: ")
+                case strings.HasPrefix(line, "data: "):
+                    ch <- name + " " + strings.TrimPrefix(line, "data: ")
+                    name = ""
+                }
+            }
+            ch <- "closed"
+        }()
+    }
+
+    func tabNext(id int, timeoutMs int) string {
+        select {
+        case event := <-tabChannel(id):
+            return event
+        case <-time.After(time.Duration(timeoutMs) * time.Millisecond):
+            return "timeout"
+        }
+    }
+}
+
+class Tab {
+    func init(self, id: int, url: str) {
+        self.id: int = id
+        self.url: str = url
+    }
+
+    func open(self) {
+        go! {
+            tabListen(s.Id, s.Url)
+        }
+    }
+
+    async func next(self, timeoutMs: int = 3000) -> str {
+        event: str = ""
+        go! {
+            event = tabNext(s.Id, timeoutMs)
+        }
+        return event
+    }
+}
+
+async func nextOf(tab: Tab) -> str {
+    return await tab.next()
+}
+
+func nextOfAll(tabs: list[Tab]) -> list[str] {
+    #- The next event of every tab, awaited concurrently. -#
+    # WORKAROUND (lamc 4.14.0 bug, /tmp/lam-pkg-compiler-bugs/
+    # async_method_comprehension.lam): `[tab.next() for tab in tabs]` builds
+    # a list of payloads instead of task handles and the generated Go does
+    # not build; a comprehension over an async top-level function works.
+    pending = [nextOf(tab) for tab in tabs]
+    events: list[str] = []
+    for task in pending {
+        events.append(await task)
+    }
+    return events
+}
+
+class Pages {
+    static func shouty(_req: Request, res: Response) {
+        res.headers["Content-Type"] = "TEXT/HTML; charset=UTF-8"
+        res.send("<html><body><pre>an example: </body></pre></body></html>")
+    }
+}
+
+func main() {
+    root: str = Os.tempDir() + "/lam-live-composed-" + str(Time.nowUnixNano())
+    _ = Os.mkdir(root + "/css")
+    _ = Os.mkdir(root + "/js/sub/deep")
+    _ = Os.writeFile(root + "/css/theme.css", "a{}")
+    _ = Os.writeFile(root + "/css/ñandú.css", "b{}")
+    _ = Os.writeFile(root + "/js/sub/deep/app.js", "1")
+
+    print(f"interval floor: {LiveReload([], '/x', 1).intervalMs}")
+
+    live: LiveReload = LiveReload([root + "/css", root + "/js", root + "/missing"], "/dev/events", 50)
+    print(f"watched files: {len(live.snapshot())} (missing root ignored)")
+
+    srv: Server = Server()
+    live.register(srv)
+    srv.get("/shouty", Pages.shouty)
+    _ = srv.listenBackground(18794).unwrap()
+
+    tabs: list[Tab] = [Tab(i, "http://127.0.0.1:18794/dev/events") for i in range(3)]
+    for tab in tabs {
+        tab.open()
+    }
+    boots: list[str] = nextOfAll(tabs)
+    print(f"three tabs booted: {boots.all(lambda e: e == 'boot ' + live.boot)}")
+
+    _ = Os.writeFile(root + "/css/theme.css", "a{color:red}")
+    _ = Os.writeFile(root + "/css/ñandú.css", "b{color:blue}")
+    styles: list[str] = nextOfAll(tabs)
+    print(f"stylesheets swapped in every tab: [{' '.join(styles)}]")
+
+    _ = Os.writeFile(root + "/js/sub/deep/app.js", "2")
+    reloads: list[str] = nextOfAll(tabs)
+    print(f"nested script reloads every tab: {len(set(reloads)) == 1} {reloads[0]}")
+
+    # A rename is a removed and a created file: two changes, not only CSS
+    # names any more once the new name is not a stylesheet.
+    _ = Os.rename(root + "/css/theme.css", root + "/css/theme.css.bak")
+    renamed: list[str] = nextOfAll(tabs)
+    print(f"renamed stylesheet reloads: {renamed[0] if renamed.all(lambda e: e == renamed[0]) else ','.join(renamed)}")
+
+    page: InjectResponse = srv.inject("GET", "/shouty")
+    at: int = page.body.index("<script")
+    print(f"upper-case TEXT/HTML injected: {at > 0} before the last body: {at == page.body.lastIndex('</body>') - len(live.tag())}")
+
+    srv.shutdown(5000)
+    closed: list[str] = nextOfAll(tabs)
+    print(f"every tab closed on shutdown: {[e for e in closed if e != 'closed'] == []}")
+    _ = Os.removeAll(root)
+    print("ok")
+}

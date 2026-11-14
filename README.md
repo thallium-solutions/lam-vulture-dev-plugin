@@ -24,7 +24,7 @@ loop.
 
 ```toml
 [dependencies]
-"@lam/vulture/dev-plugin" = { git = "https://github.com/thallium-solutions/lam-vulture-dev-plugin.git", ref = "1.2.2" }
+"@lam/vulture/dev-plugin" = { git = "https://github.com/thallium-solutions/lam-vulture-dev-plugin.git", ref = "1.2.3" }
 ```
 
 ```bash
@@ -69,7 +69,8 @@ open pages reload once the new build serves.
 What `register` adds:
 
 - `GET <path>`: a Server-Sent Events stream. It sends `boot` (an id of this
-  server process) on connect, `styles` with the changed stylesheet file names
+  server process) on connect, once it has taken its first snapshot of the
+  watched files so every change made after `boot` is reported, `styles` with the changed stylesheet file names
   when only `.css` files changed, and `reload` when other watched assets
   changed. Assets are files or directories (recursive) checked every
   `intervalMs` by content hash; a file is read and hashed again only when its

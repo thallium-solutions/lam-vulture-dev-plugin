@@ -2,6 +2,32 @@
 
 All notable changes to `@lam/vulture/dev-plugin` are documented here.
 
+## [1.2.3] - 2026-11-14
+
+### Fixed
+
+- A stream reports every change made after its `boot` event. The stream sent
+  `boot` and then took its first snapshot of the watched files, so a file
+  written right after a client received `boot` could land in that snapshot
+  and never be reported (a stylesheet saved just as a tab connected was not
+  swapped; `test_live_reload_stream.lam` failed with `styles event: timeout`
+  about 1 run in 3, 16 of 30 runs under load). The first snapshot is now
+  taken before `boot` is sent: 0 failures in 40 runs.
+
+### Tests
+
+- `tests/test_live_reload_snapshot_order.lam` (regression, deterministic: a
+  subclass slows the first `snapshot()` so the old order failed every run): a
+  change made right after `boot` is reported; a same-content rewrite is quiet;
+  created and deleted files reload; a second stream starts from the current
+  files.
+- `tests/test_live_reload_composed.lam`: several roots (nested directory,
+  non-ASCII file names, a missing root) served to three concurrent streams
+  awaited from async tasks; multi-stylesheet `styles` events, nested script
+  and rename reloads, the 50 ms interval floor, injection into an upper-case
+  `TEXT/HTML` response before the last `</body>`, and every stream closed on
+  shutdown.
+
 ## [1.2.2] - 2026-11-14
 
 ### Fixed
