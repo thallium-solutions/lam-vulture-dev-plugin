@@ -2,6 +2,16 @@
 
 All notable changes to `@lam/vulture/dev-plugin` are documented here.
 
+## [1.2.2] - 2026-11-14
+
+### Fixed
+
+- The `Content-Length` of an HTML response the script tag is injected into
+  is its size in bytes (`len(bytes(body))`). It was `len(body)`, which counts
+  characters from lamc 4.14 on (strings are sequences of characters), so a
+  page with non-ASCII text announced fewer bytes than it sent and browsers cut
+  it short. Correct with lamc 4.13 and 4.14; tested with a non-ASCII page.
+
 ## [1.2.1] - 2026-11-09
 
 ### Changed

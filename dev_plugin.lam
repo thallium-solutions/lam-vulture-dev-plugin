@@ -290,7 +290,8 @@ class LiveReload {
         }
         res.body = res.body[:at] + self.tag() + res.body[at:]
         if "Content-Length" in res.headers {
-            res.headers["Content-Length"] = str(len(res.body))
+            # Bytes, not characters: len(str) counts characters since lamc 4.14.
+            res.headers["Content-Length"] = str(len(bytes(res.body)))
         }
     }
 }

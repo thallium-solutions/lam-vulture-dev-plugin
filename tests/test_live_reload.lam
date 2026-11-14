@@ -10,6 +10,7 @@
 # expect: script keeps events and reconnect: true
 # expect: document: injected=true before-body=true once=true
 # expect: content-length follows: true
+# expect: non-ASCII document: injected=true text=true content-length=bytes
 # expect: fragment untouched: true
 # expect: json untouched: true
 # expect: custom path: /dev/reload.js tag=true
@@ -80,6 +81,8 @@ func checkSnapshots() {
 }
 
 const Document: str = "<!doctype html><html><head><title>t</title></head><body><main>hi</main></body></html>"
+# Multi-byte characters: Content-Length counts bytes, not characters.
+const UnicodeDocument: str = "<!doctype html><html><head><meta charset=\"utf-8\"><title>Città</title></head><body><main>caffè ☕ 日本語 — ünïcödé</main></body></html>"
 
 class Pages {
     static func document(_req: Request, res: Response) {
@@ -87,8 +90,13 @@ class Pages {
     }
 
     static func sized(_req: Request, res: Response) {
-        res.headers["Content-Length"] = str(len(Document))
+        res.headers["Content-Length"] = str(len(bytes(Document)))
         res.html(Document)
+    }
+
+    static func unicode(_req: Request, res: Response) {
+        res.headers["Content-Length"] = str(len(bytes(UnicodeDocument)))
+        res.html(UnicodeDocument)
     }
 
     static func fragment(_req: Request, res: Response) {
@@ -104,6 +112,7 @@ func server(plugin: func(Server)) -> Server {
     srv: Server = Server()
     srv.get("/", Pages.document)
     srv.get("/sized", Pages.sized)
+    srv.get("/unicode", Pages.unicode)
     srv.get("/fragment", Pages.fragment)
     srv.get("/data", Pages.data)
     srv.register(plugin)
@@ -146,7 +155,12 @@ func main() {
     tag: str = f"<script src=\"{LiveReloadPath}.js\""
     print(f"document: injected={tag in doc} before-body={doc.index(tag) < doc.index('</body>')} once={doc.count(tag) == 1}")
     sized: InjectResponse = srv.inject("GET", "/sized")
-    print(f"content-length follows: {sized.header('Content-Length') == str(len(sized.body)) and len(sized.body) > len(Document)}")
+    print(f"content-length follows: {sized.header('Content-Length') == str(len(bytes(sized.body))) and len(sized.body) > len(Document)}")
+    wide: InjectResponse = srv.inject("GET", "/unicode")
+    wideTag: bool = wide.body.index(tag) > 0 and wide.body.index(tag) < wide.body.index("</body>")
+    wideText: bool = "<main>caffè ☕ 日本語 — ünïcödé</main>" in wide.body
+    wideLength: str = "bytes" if wide.header("Content-Length") == str(len(bytes(wide.body))) else f"{wide.header('Content-Length')} for {len(bytes(wide.body))} bytes"
+    print(f"non-ASCII document: injected={wideTag} text={wideText} content-length={wideLength}")
     print(f"fragment untouched: {srv.inject('GET', '/fragment').body == '<li>partial</li>'}")
     print(f"json untouched: {'script' not in srv.inject('GET', '/data').body}")
 

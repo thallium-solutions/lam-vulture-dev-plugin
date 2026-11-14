@@ -1,6 +1,6 @@
 [library]
 name = "@lam/vulture/dev-plugin"
-version = "1.2.1"
+version = "1.2.2"
 description = "Development helpers for @lam/vulture: browser live reload for lamc dev"
 license = "Apache-2.0"
 authors = ["Lammergeier contributors"]

@@ -24,7 +24,7 @@ loop.
 
 ```toml
 [dependencies]
-"@lam/vulture/dev-plugin" = { git = "https://github.com/thallium-solutions/lam-vulture-dev-plugin.git", ref = "1.1.0" }
+"@lam/vulture/dev-plugin" = { git = "https://github.com/thallium-solutions/lam-vulture-dev-plugin.git", ref = "1.2.2" }
 ```
 
 ```bash
@@ -84,7 +84,7 @@ What `register` adds:
 - An `onSend` hook inserting `<script src="<path>.js" ... defer>` before
   `</body>` of `text/html` responses that contain `</body>`; fragments (htmx
   partials) and other content types are untouched, and `Content-Length` is
-  updated when set. The script is same-origin, so a `script-src 'self'`
+  updated (in bytes) when set. The script is same-origin, so a `script-src 'self'`
   Content Security Policy allows it.
 
 The script reconnects every 300 ms while the server restarts, and reloads when
